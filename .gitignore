@@ -1,0 +1,23 @@
+# Build and dependency output
+build/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Private project notes
+execution.md
+project-spec.md
+projectspec.md
+
+# Logs and local tooling
+*.log
+.cursor/
+.vscode/
+.idea/
