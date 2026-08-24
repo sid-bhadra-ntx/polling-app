@@ -15,16 +15,22 @@ type Config struct {
 	DBUser     string
 	DBPassword string
 	DBName     string
+	DBSSLMode  string
 	JWTSecret  string
 }
 
 // Load reads the backend configuration from environment variables.
 func Load() (Config, error) {
+	dbSSLMode := os.Getenv("DB_SSLMODE")
+	if dbSSLMode == "" {
+		dbSSLMode = "disable"
+	}
 	cfg := Config{
 		DBHost:     os.Getenv("DB_HOST"),
 		DBUser:     os.Getenv("DB_USER"),
 		DBPassword: os.Getenv("DB_PASSWORD"),
 		DBName:     os.Getenv("DB_NAME"),
+		DBSSLMode:  dbSSLMode,
 		JWTSecret:  os.Getenv("JWT_SECRET"),
 		DBPort:     5432,
 	}
@@ -56,13 +62,17 @@ func Load() (Config, error) {
 
 // DSN returns a PostgreSQL URL with credentials safely escaped.
 func (c Config) DSN() string {
+	sslMode := c.DBSSLMode
+	if sslMode == "" {
+		sslMode = "disable"
+	}
 	return (&url.URL{
 		Scheme: "postgres",
 		User:   url.UserPassword(c.DBUser, c.DBPassword),
 		Host:   fmt.Sprintf("%s:%d", c.DBHost, c.DBPort),
 		Path:   "/" + c.DBName,
 		RawQuery: url.Values{
-			"sslmode": {"disable"},
+			"sslmode": {sslMode},
 		}.Encode(),
 	}).String()
 }
