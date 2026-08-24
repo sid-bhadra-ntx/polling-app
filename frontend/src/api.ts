@@ -121,6 +121,10 @@ export function listPolls() {
   return request<Poll[]>('/api/polls')
 }
 
+export function getPoll(id: number) {
+  return request<Poll>(`/api/polls/${id}`)
+}
+
 export function createPoll(input: {
   title: string
   description: string
@@ -134,7 +138,11 @@ export function createPoll(input: {
 
 export function updatePoll(
   id: number,
-  input: { title: string; description: string; options: string[] },
+  input: {
+    title: string
+    description: string
+    options: { id: number; text: string }[]
+  },
 ) {
   return request<Poll>(`/api/polls/${id}`, {
     method: 'PUT',

@@ -124,21 +124,36 @@ func TestAPIWorkflow(t *testing.T) {
 		if !found {
 			t.Fatalf("created poll %d was not returned in poll listing", poll.ID)
 		}
+
+		singleResponse := jsonRequest(t, handler, http.MethodGet, fmt.Sprintf("/api/polls/%d", poll.ID), ownerToken, nil)
+		assertStatus(t, singleResponse, http.StatusOK)
+		var fetched pollResponse
+		decodeResponse(t, singleResponse, &fetched)
+		if fetched.ID != poll.ID || len(fetched.Options) != len(poll.Options) {
+			t.Fatalf("unexpected single poll response: %#v", fetched)
+		}
 	})
 
 	otherToken := signupAndLoginUser(t, handler, otherUsername, otherEmail, password)
 
 	t.Run("creator-only update and deletion", func(t *testing.T) {
 		unauthorizedUpdate := jsonRequest(t, handler, http.MethodPut, fmt.Sprintf("/api/polls/%d", poll.ID), otherToken, map[string]any{
-			"title":   "Unauthorized update",
-			"options": []string{"A", "B"},
+			"title": "Unauthorized update",
+			"options": []map[string]any{
+				{"text": "A"},
+				{"text": "B"},
+			},
 		})
 		assertStatus(t, unauthorizedUpdate, http.StatusNotFound)
 
 		response := jsonRequest(t, handler, http.MethodPut, fmt.Sprintf("/api/polls/%d", poll.ID), ownerToken, map[string]any{
 			"title":       "Updated integration poll",
 			"description": "Updated by the creator",
-			"options":     []string{"Option A updated", "Option B", "Option C"},
+			"options": []map[string]any{
+				{"id": poll.Options[0].ID, "text": "Option A"},
+				{"id": poll.Options[1].ID, "text": "Option B updated"},
+				{"text": "Option C"},
+			},
 		})
 		assertStatus(t, response, http.StatusOK)
 		decodeResponse(t, response, &poll)
@@ -180,6 +195,25 @@ func TestAPIWorkflow(t *testing.T) {
 			t.Fatalf("expected one vote for each option, got %#v", counts)
 		}
 
+		updateResponse := jsonRequest(t, handler, http.MethodPut, fmt.Sprintf("/api/polls/%d", poll.ID), ownerToken, map[string]any{
+			"title":       poll.Title,
+			"description": poll.Description,
+			"options": []map[string]any{
+				{"id": optionA, "text": "Option A"},
+				{"id": optionB, "text": "Option B edited"},
+				{"id": poll.Options[2].ID, "text": "Option C"},
+			},
+		})
+		assertStatus(t, updateResponse, http.StatusOK)
+		decodeResponse(t, updateResponse, &poll)
+
+		countsAfterEditResponse := jsonRequest(t, handler, http.MethodGet, fmt.Sprintf("/api/polls/%d/counts", poll.ID), ownerToken, nil)
+		assertStatus(t, countsAfterEditResponse, http.StatusOK)
+		decodeResponse(t, countsAfterEditResponse, &counts)
+		if countForOption(counts, optionA) != 1 || countForOption(counts, optionB) != 0 {
+			t.Fatalf("expected unchanged option vote to remain and edited option vote to reset, got %#v", counts)
+		}
+
 		votersResponse := jsonRequest(t, handler, http.MethodGet, fmt.Sprintf("/api/options/%d/voters", optionA), ownerToken, nil)
 		assertStatus(t, votersResponse, http.StatusOK)
 		var voters []userResponse
@@ -198,8 +232,11 @@ func TestAPIWorkflow(t *testing.T) {
 		assertStatus(t, missingVoters, http.StatusNotFound)
 
 		missingUpdate := jsonRequest(t, handler, http.MethodPut, fmt.Sprintf("/api/polls/%d", missingID), ownerToken, map[string]any{
-			"title":   "Missing poll",
-			"options": []string{"A", "B"},
+			"title": "Missing poll",
+			"options": []map[string]any{
+				{"text": "A"},
+				{"text": "B"},
+			},
 		})
 		assertStatus(t, missingUpdate, http.StatusNotFound)
 

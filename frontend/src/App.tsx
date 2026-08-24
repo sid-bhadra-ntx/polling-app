@@ -652,7 +652,11 @@ function PollEditor({
   const [title, setTitle] = useState(poll?.title ?? '')
   const [description, setDescription] = useState(poll?.description ?? '')
   const [options, setOptions] = useState(
-    poll?.options.map((option) => option.text) ?? ['', ''],
+    () =>
+      poll?.options.map((option) => ({ id: option.id, text: option.text })) ?? [
+        { id: 0, text: '' },
+        { id: 0, text: '' },
+      ],
   )
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
@@ -673,7 +677,10 @@ function PollEditor({
     event.preventDefault()
     setError('')
     const cleanTitle = title.trim()
-    const cleanOptions = options.map((option) => option.trim())
+    const cleanOptions = options.map((option) => ({
+      id: option.id,
+      text: option.text.trim(),
+    }))
     if (!cleanTitle) {
       setError('A poll title is required.')
       return
@@ -682,7 +689,7 @@ function PollEditor({
       setError('Add at least two options.')
       return
     }
-    if (cleanOptions.some((option) => !option)) {
+    if (cleanOptions.some((option) => !option.text)) {
       setError('Options cannot be empty.')
       return
     }
@@ -698,7 +705,7 @@ function PollEditor({
         : await createPoll({
             title: cleanTitle,
             description: description.trim(),
-            options: cleanOptions,
+            options: cleanOptions.map((option) => option.text),
           })
       onSaved(savedPoll)
     } catch (saveError) {
@@ -749,13 +756,18 @@ function PollEditor({
               <span className="muted">At least 2</span>
             </div>
             {options.map((option, index) => (
-              <div className="option-input-row" key={index}>
+              <div
+                className="option-input-row"
+                key={option.id || `new-${index}`}
+              >
                 <input
-                  value={option}
+                  value={option.text}
                   onChange={(event) =>
                     setOptions((previous) =>
                       previous.map((item, itemIndex) =>
-                        itemIndex === index ? event.target.value : item,
+                        itemIndex === index
+                          ? { ...item, text: event.target.value }
+                          : item,
                       ),
                     )
                   }
@@ -779,7 +791,9 @@ function PollEditor({
             <button
               type="button"
               className="text-button add-option"
-              onClick={() => setOptions((previous) => [...previous, ''])}
+              onClick={() =>
+                setOptions((previous) => [...previous, { id: 0, text: '' }])
+              }
             >
               ＋ Add another option
             </button>

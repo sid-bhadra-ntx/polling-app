@@ -38,6 +38,7 @@ func NewHandler(client *ent.Client, cfg config.Config) http.Handler {
 	router.POST("/api/signup", api.signup)
 	router.POST("/api/login", api.login)
 	router.GET("/api/polls", api.requireAuth(api.listPolls))
+	router.GET("/api/polls/:id", api.requireAuth(api.getPoll))
 	router.POST("/api/polls", api.requireAuth(api.createPoll))
 	router.PUT("/api/polls/:id", api.requireAuth(api.updatePoll))
 	router.DELETE("/api/polls/:id", api.requireAuth(api.deletePoll))
@@ -62,6 +63,17 @@ type pollRequest struct {
 	Title       string   `json:"title"`
 	Description string   `json:"description"`
 	Options     []string `json:"options"`
+}
+
+type updatePollRequest struct {
+	Title       string              `json:"title"`
+	Description string              `json:"description"`
+	Options     []pollOptionRequest `json:"options"`
+}
+
+type pollOptionRequest struct {
+	ID   int    `json:"id"`
+	Text string `json:"text"`
 }
 
 type voteRequest struct {
@@ -172,6 +184,26 @@ func (a *API) listPolls(w http.ResponseWriter, r *http.Request, _ httprouter.Par
 	writeJSON(w, http.StatusOK, response)
 }
 
+func (a *API) getPoll(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
+	id, ok := pathID(w, params)
+	if !ok {
+		return
+	}
+	item, err := a.client.Poll.Query().
+		Where(poll.IDEQ(id)).
+		WithOptions().
+		Only(r.Context())
+	if ent.IsNotFound(err) {
+		writeError(w, http.StatusNotFound, "poll not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not load poll")
+		return
+	}
+	writeJSON(w, http.StatusOK, toPollResponse(item))
+}
+
 func (a *API) createPoll(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 	var request pollRequest
 	if !decodeJSON(w, r, &request) {
@@ -225,11 +257,11 @@ func (a *API) updatePoll(w http.ResponseWriter, r *http.Request, params httprout
 	if !ok {
 		return
 	}
-	var request pollRequest
+	var request updatePollRequest
 	if !decodeJSON(w, r, &request) {
 		return
 	}
-	if err := validatePollRequest(&request); err != nil {
+	if err := validateUpdatePollRequest(&request); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -240,35 +272,85 @@ func (a *API) updatePoll(w http.ResponseWriter, r *http.Request, params httprout
 		writeError(w, http.StatusInternalServerError, "could not start transaction")
 		return
 	}
-	_, err = tx.Poll.UpdateOneID(id).
-		Where(poll.CreatorIDEQ(ownerID)).
-		SetTitle(strings.TrimSpace(request.Title)).
-		SetDescription(request.Description).
-		Save(r.Context())
+
+	existingPoll, err := tx.Poll.Query().
+		Where(poll.IDEQ(id), poll.CreatorIDEQ(ownerID)).
+		WithOptions().
+		Only(r.Context())
 	if ent.IsNotFound(err) {
 		_ = tx.Rollback()
 		writeError(w, http.StatusNotFound, "poll not found")
 		return
 	}
-	if err == nil {
-		_, err = tx.PollOption.Delete().Where(polloption.PollIDEQ(id)).Exec(r.Context())
+	if err != nil {
+		_ = tx.Rollback()
+		writeError(w, http.StatusInternalServerError, "could not load poll")
+		return
 	}
-	if err == nil {
-		for _, text := range request.Options {
-			_, err = tx.PollOption.Create().
-				SetText(strings.TrimSpace(text)).
-				SetPollID(id).
-				Save(r.Context())
-			if err != nil {
-				break
-			}
-		}
-	}
+
+	_, err = tx.Poll.UpdateOneID(id).
+		SetTitle(request.Title).
+		SetDescription(request.Description).
+		Save(r.Context())
 	if err != nil {
 		_ = tx.Rollback()
 		writeError(w, http.StatusInternalServerError, "could not update poll")
 		return
 	}
+
+	existingOptions := existingPoll.Edges.Options
+	existingByID := make(map[int]*ent.PollOption, len(existingOptions))
+	for _, option := range existingOptions {
+		existingByID[option.ID] = option
+	}
+
+	requestedIDs := make(map[int]struct{}, len(request.Options))
+	for _, option := range request.Options {
+		if option.ID == 0 {
+			continue
+		}
+		if _, exists := existingByID[option.ID]; !exists {
+			_ = tx.Rollback()
+			writeError(w, http.StatusBadRequest, "option does not belong to this poll")
+			return
+		}
+		requestedIDs[option.ID] = struct{}{}
+	}
+
+	for _, option := range existingOptions {
+		if _, requested := requestedIDs[option.ID]; requested {
+			continue
+		}
+		if err := tx.PollOption.DeleteOneID(option.ID).Exec(r.Context()); err != nil {
+			_ = tx.Rollback()
+			writeError(w, http.StatusInternalServerError, "could not update poll")
+			return
+		}
+	}
+
+	for _, option := range request.Options {
+		if option.ID == 0 {
+			_, err = tx.PollOption.Create().
+				SetText(option.Text).
+				SetPollID(id).
+				Save(r.Context())
+		} else if existingByID[option.ID].Text != option.Text {
+			_, err = tx.Vote.Delete().
+				Where(vote.OptionIDEQ(option.ID)).
+				Exec(r.Context())
+			if err == nil {
+				_, err = tx.PollOption.UpdateOneID(option.ID).
+					SetText(option.Text).
+					Save(r.Context())
+			}
+		}
+		if err != nil {
+			_ = tx.Rollback()
+			writeError(w, http.StatusInternalServerError, "could not update poll")
+			return
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		writeError(w, http.StatusInternalServerError, "could not save poll")
 		return
@@ -448,6 +530,33 @@ func validatePollRequest(request *pollRequest) error {
 		request.Options[i] = strings.TrimSpace(request.Options[i])
 		if request.Options[i] == "" {
 			return errors.New("options cannot be empty")
+		}
+	}
+	return nil
+}
+
+func validateUpdatePollRequest(request *updatePollRequest) error {
+	request.Title = strings.TrimSpace(request.Title)
+	if request.Title == "" {
+		return errors.New("title is required")
+	}
+	if len(request.Options) < 2 {
+		return errors.New("at least two options are required")
+	}
+	seenIDs := make(map[int]struct{}, len(request.Options))
+	for i := range request.Options {
+		request.Options[i].Text = strings.TrimSpace(request.Options[i].Text)
+		if request.Options[i].Text == "" {
+			return errors.New("options cannot be empty")
+		}
+		if request.Options[i].ID < 0 {
+			return errors.New("option id must not be negative")
+		}
+		if request.Options[i].ID > 0 {
+			if _, exists := seenIDs[request.Options[i].ID]; exists {
+				return errors.New("an option cannot be included more than once")
+			}
+			seenIDs[request.Options[i].ID] = struct{}{}
 		}
 	}
 	return nil
