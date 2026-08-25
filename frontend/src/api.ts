@@ -14,6 +14,8 @@ export type Poll = {
   title: string
   description: string
   creator_id: number
+  creator_username: string
+  has_voted: boolean
   options: PollOption[]
 }
 
@@ -162,6 +164,17 @@ export function vote(pollID: number, optionID: number) {
       body: JSON.stringify({ option_id: optionID }),
     },
   )
+}
+
+export function removeVote(pollID: number, optionID: number) {
+  return request<void>(`/api/polls/${pollID}/vote`, {
+    method: 'DELETE',
+    body: JSON.stringify({ option_id: optionID }),
+  })
+}
+
+export function getMyVotes(pollID: number) {
+  return request<number[]>(`/api/polls/${pollID}/my-votes`)
 }
 
 export function getPollCounts(id: number) {

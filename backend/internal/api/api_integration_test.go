@@ -169,6 +169,17 @@ func TestAPIWorkflow(t *testing.T) {
 		optionA := poll.Options[0].ID
 		optionB := poll.Options[1].ID
 
+		hiddenCounts := jsonRequest(t, handler, http.MethodGet, fmt.Sprintf("/api/polls/%d/counts", poll.ID), ownerToken, nil)
+		assertStatus(t, hiddenCounts, http.StatusForbidden)
+
+		initialVotes := jsonRequest(t, handler, http.MethodGet, fmt.Sprintf("/api/polls/%d/my-votes", poll.ID), ownerToken, nil)
+		assertStatus(t, initialVotes, http.StatusOK)
+		var initialVoteIDs []int
+		decodeResponse(t, initialVotes, &initialVoteIDs)
+		if len(initialVoteIDs) != 0 {
+			t.Fatalf("expected no votes before voting, got %#v", initialVoteIDs)
+		}
+
 		firstVote := jsonRequest(t, handler, http.MethodPost, fmt.Sprintf("/api/polls/%d/vote", poll.ID), ownerToken, map[string]int{
 			"option_id": optionA,
 		})
@@ -183,6 +194,14 @@ func TestAPIWorkflow(t *testing.T) {
 			"option_id": optionA,
 		})
 		assertStatus(t, duplicateVote, http.StatusConflict)
+
+		currentVotes := jsonRequest(t, handler, http.MethodGet, fmt.Sprintf("/api/polls/%d/my-votes", poll.ID), ownerToken, nil)
+		assertStatus(t, currentVotes, http.StatusOK)
+		var currentVoteIDs []int
+		decodeResponse(t, currentVotes, &currentVoteIDs)
+		if len(currentVoteIDs) != 2 {
+			t.Fatalf("expected two current votes, got %#v", currentVoteIDs)
+		}
 
 		countsResponse := jsonRequest(t, handler, http.MethodGet, fmt.Sprintf("/api/polls/%d/counts", poll.ID), ownerToken, nil)
 		assertStatus(t, countsResponse, http.StatusOK)
@@ -220,6 +239,18 @@ func TestAPIWorkflow(t *testing.T) {
 		decodeResponse(t, votersResponse, &voters)
 		if len(voters) != 1 || voters[0].Username != ownerUsername {
 			t.Fatalf("unexpected voters response: %#v", voters)
+		}
+
+		removeVoteResponse := jsonRequest(t, handler, http.MethodDelete, fmt.Sprintf("/api/polls/%d/vote", poll.ID), ownerToken, map[string]int{
+			"option_id": optionA,
+		})
+		assertStatus(t, removeVoteResponse, http.StatusNoContent)
+
+		votesAfterRemoval := jsonRequest(t, handler, http.MethodGet, fmt.Sprintf("/api/polls/%d/my-votes", poll.ID), ownerToken, nil)
+		assertStatus(t, votesAfterRemoval, http.StatusOK)
+		decodeResponse(t, votesAfterRemoval, &currentVoteIDs)
+		if len(currentVoteIDs) != 1 || currentVoteIDs[0] != optionB {
+			t.Fatalf("expected only option B vote after removal, got %#v", currentVoteIDs)
 		}
 	})
 

@@ -5,11 +5,13 @@ import {
   clearStoredSession,
   createPoll,
   deletePoll,
+  getMyVotes,
   getPollCounts,
   getStoredSession,
   getVoters,
   listPolls,
   login,
+  removeVote,
   signup,
   updatePoll,
   vote,
@@ -307,6 +309,10 @@ function PollList({
   const [polls, setPolls] = useState<Poll[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [searchMode, setSearchMode] = useState<'name' | 'author'>('name')
+  const [onlyUnvoted, setOnlyUnvoted] = useState(false)
 
   useEffect(() => {
     let active = true
@@ -336,6 +342,15 @@ function PollList({
     }
   }, [refreshKey, onUnauthorized])
 
+  const normalizedQuery = searchQuery.trim().toLowerCase()
+  const visiblePolls = polls.filter((poll) => {
+    const searchTarget =
+      searchMode === 'name' ? poll.title : poll.creator_username
+    const matchesQuery =
+      !normalizedQuery || searchTarget.toLowerCase().includes(normalizedQuery)
+    return matchesQuery && (!onlyUnvoted || !poll.has_voted)
+  })
+
   return (
     <section>
       <div className="page-heading">
@@ -344,10 +359,78 @@ function PollList({
           <h1>All polls</h1>
           <p className="muted">Ask a question. Start a conversation.</p>
         </div>
-        <button type="button" className="primary-button" onClick={onCreate}>
-          <span aria-hidden="true">＋</span> Create poll
-        </button>
+        <div className="page-heading-actions">
+          <button
+            type="button"
+            className="search-toggle"
+            aria-label={searchOpen ? 'Close poll search' : 'Search polls'}
+            aria-expanded={searchOpen}
+            onClick={() => setSearchOpen((open) => !open)}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="10.8" cy="10.8" r="6.3" />
+              <path d="m16 16 4.5 4.5" />
+            </svg>
+          </button>
+          <button type="button" className="primary-button" onClick={onCreate}>
+            <span aria-hidden="true">＋</span> Create poll
+          </button>
+        </div>
       </div>
+
+      {searchOpen && (
+        <div className="search-panel">
+          <label className="search-field">
+            <span className="visually-hidden">Search polls</span>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="10.8" cy="10.8" r="6.3" />
+              <path d="m16 16 4.5 4.5" />
+            </svg>
+            <input
+              value={searchQuery}
+              onChange={(event) => setSearchQuery(event.target.value)}
+              placeholder={
+                searchMode === 'name'
+                  ? 'Search by poll name…'
+                  : 'Search by author…'
+              }
+              autoFocus
+            />
+          </label>
+          <label className="search-select">
+            <span>Search by</span>
+            <select
+              value={searchMode}
+              onChange={(event) =>
+                setSearchMode(event.target.value as 'name' | 'author')
+              }
+            >
+              <option value="name">Poll name</option>
+              <option value="author">Author</option>
+            </select>
+          </label>
+          <label className="search-filter">
+            <input
+              type="checkbox"
+              checked={onlyUnvoted}
+              onChange={(event) => setOnlyUnvoted(event.target.checked)}
+            />
+            Not voted yet
+          </label>
+          {(searchQuery || onlyUnvoted) && (
+            <button
+              type="button"
+              className="text-button"
+              onClick={() => {
+                setSearchQuery('')
+                setOnlyUnvoted(false)
+              }}
+            >
+              Clear
+            </button>
+          )}
+        </div>
+      )}
 
       {loading && <LoadingState label="Loading polls…" />}
       {error && (
@@ -372,9 +455,16 @@ function PollList({
           </button>
         </div>
       )}
-      {!loading && !error && polls.length > 0 && (
+      {!loading && !error && polls.length > 0 && visiblePolls.length === 0 && (
+        <div className="empty-state">
+          <div className="empty-icon">⌕</div>
+          <h2>No matching polls</h2>
+          <p className="muted">Try another search or clear your filters.</p>
+        </div>
+      )}
+      {!loading && !error && visiblePolls.length > 0 && (
         <div className="poll-grid">
-          {polls.map((poll) => (
+          {visiblePolls.map((poll) => (
             <article className="poll-card" key={poll.id}>
               <div className="poll-card-top">
                 <span className="option-count">
@@ -387,6 +477,9 @@ function PollList({
               <h2>{poll.title}</h2>
               <p className="poll-description">
                 {poll.description || 'No description provided.'}
+              </p>
+              <p className="poll-author">
+                By {poll.creator_username || 'Unknown author'}
               </p>
               <div className="poll-card-footer">
                 <span className="muted">Ready for your vote</span>
@@ -427,6 +520,7 @@ function PollDetail({
   const [loadingCounts, setLoadingCounts] = useState(true)
   const [loadingVote, setLoadingVote] = useState<number | null>(null)
   const [votedOptions, setVotedOptions] = useState<Set<number>>(new Set())
+  const [resultsRevealed, setResultsRevealed] = useState(false)
   const [error, setError] = useState('')
   const [expandedOption, setExpandedOption] = useState<number | null>(null)
   const [voters, setVoters] = useState<Record<number, User[]>>({})
@@ -442,6 +536,7 @@ function PollDetail({
           nextCounts.map((item: VoteCount) => [item.option_id, item.count]),
         ),
       )
+      setResultsRevealed(true)
     } catch (loadError) {
       if (loadError instanceof ApiError && loadError.status === 401) {
         onUnauthorized()
@@ -455,9 +550,18 @@ function PollDetail({
 
   useEffect(() => {
     let active = true
-    getPollCounts(poll.id)
-      .then((nextCounts) => {
-        if (active) {
+    async function loadVotingState() {
+      try {
+        const nextVotedOptions = await getMyVotes(poll.id)
+        if (!active) {
+          return
+        }
+        setVotedOptions(new Set(nextVotedOptions))
+        if (nextVotedOptions.length > 0) {
+          const nextCounts = await getPollCounts(poll.id)
+          if (!active) {
+            return
+          }
           setCounts(
             Object.fromEntries(
               nextCounts.map((item: VoteCount) => [
@@ -466,9 +570,9 @@ function PollDetail({
               ]),
             ),
           )
+          setResultsRevealed(true)
         }
-      })
-      .catch((loadError: unknown) => {
+      } catch (loadError: unknown) {
         if (!active) {
           return
         }
@@ -477,12 +581,13 @@ function PollDetail({
         } else {
           setError(errorMessage(loadError))
         }
-      })
-      .finally(() => {
+      } finally {
         if (active) {
           setLoadingCounts(false)
         }
-      })
+      }
+    }
+    void loadVotingState()
     return () => {
       active = false
     }
@@ -500,6 +605,41 @@ function PollDetail({
         onUnauthorized()
       } else {
         setError(errorMessage(voteError))
+      }
+    } finally {
+      setLoadingVote(null)
+    }
+  }
+
+  async function handleUnvote(optionID: number) {
+    setError('')
+    setLoadingVote(optionID)
+    try {
+      await removeVote(poll.id, optionID)
+      setVotedOptions((previous) => {
+        const next = new Set(previous)
+        next.delete(optionID)
+        return next
+      })
+      setCounts((previous) => ({
+        ...previous,
+        [optionID]: Math.max((previous[optionID] ?? 0) - 1, 0),
+      }))
+      setVoters((previous) => {
+        const optionVoters = previous[optionID]
+        if (!optionVoters) {
+          return previous
+        }
+        return {
+          ...previous,
+          [optionID]: optionVoters.filter((voter) => voter.id !== currentUser.id),
+        }
+      })
+    } catch (unvoteError) {
+      if (unvoteError instanceof ApiError && unvoteError.status === 401) {
+        onUnauthorized()
+      } else {
+        setError(errorMessage(unvoteError))
       }
     } finally {
       setLoadingVote(null)
@@ -536,6 +676,9 @@ function PollDetail({
 
   const totalVotes = Object.values(counts).reduce((sum, count) => sum + count, 0)
   const isOwner = poll.creator_id === currentUser.id
+  const expandedVoterOption = poll.options.find(
+    (option) => option.id === expandedOption,
+  )
 
   return (
     <section className="detail-layout">
@@ -563,72 +706,194 @@ function PollDetail({
       </div>
 
       {error && <ErrorBanner message={error} />}
-      {voterError && <ErrorBanner message={voterError} />}
       <div className="vote-summary">
-        <strong>{totalVotes}</strong>
-        <span className="muted">total votes</span>
-        <span className="summary-divider" />
-        <span className="muted">Select any option you like</span>
+        {loadingCounts ? (
+          <span className="muted">Checking your voting status…</span>
+        ) : resultsRevealed ? (
+          <>
+            <strong>{totalVotes}</strong>
+            <span className="muted">total votes</span>
+            <span className="summary-divider" />
+            <span className="muted">Select any option you like</span>
+          </>
+        ) : (
+          <span className="muted">Vote once to reveal the results.</span>
+        )}
       </div>
+
+      {resultsRevealed && !loadingCounts && (
+        <VoteDistribution
+          options={poll.options}
+          counts={counts}
+          totalVotes={totalVotes}
+        />
+      )}
 
       <div className="options-list">
         {poll.options.map((option) => {
           const count = counts[option.id] ?? 0
-          const percentage = totalVotes ? Math.round((count / totalVotes) * 100) : 0
+          const percentage = resultsRevealed && totalVotes
+            ? (count / totalVotes) * 100
+            : 0
           const hasVoted = votedOptions.has(option.id)
           return (
             <article className="option-card" key={option.id}>
               <div className="option-main">
                 <div className="option-info">
-                  <h2>{option.text}</h2>
+                  <div className="option-heading-row">
+                    <h2>{option.text}</h2>
+                    <strong className="option-vote-count">
+                      {loadingCounts
+                        ? 'Checking…'
+                        : resultsRevealed
+                          ? `${count} vote${count === 1 ? '' : 's'}`
+                          : 'Results hidden'}
+                    </strong>
+                  </div>
                   <div className="progress-track" aria-hidden="true">
                     <div className="progress-bar" style={{ width: `${percentage}%` }} />
                   </div>
-                  <span className="muted">
-                    {loadingCounts ? 'Loading votes…' : `${count} vote${count === 1 ? '' : 's'} · ${percentage}%`}
-                  </span>
                 </div>
                 <button
                   type="button"
                   className={hasVoted ? 'voted-button' : 'primary-button'}
-                  disabled={hasVoted || loadingVote !== null}
-                  onClick={() => void handleVote(option.id)}
+                  disabled={loadingVote !== null || loadingCounts}
+                  onClick={() =>
+                    void (hasVoted
+                      ? handleUnvote(option.id)
+                      : handleVote(option.id))
+                  }
                 >
                   {loadingVote === option.id
-                    ? 'Voting…'
+                    ? hasVoted
+                      ? 'Removing…'
+                      : 'Voting…'
                     : hasVoted
-                      ? 'Voted'
+                      ? 'Unvote'
                       : 'Vote'}
                 </button>
               </div>
-              <button
-                type="button"
-                className="voters-toggle"
-                onClick={() => void toggleVoters(option.id)}
-              >
-                {expandedOption === option.id ? 'Hide voters' : 'See voters'}{' '}
-                <span aria-hidden="true">↓</span>
-              </button>
-              {expandedOption === option.id && (
-                <div className="voters-panel">
-                  {loadingVoters === option.id && <LoadingState label="Loading voters…" />}
-                  {voters[option.id]?.length === 0 && (
-                    <p className="muted">No one has voted for this option yet.</p>
-                  )}
-                  {voters[option.id]?.map((voter) => (
-                    <div className="voter-row" key={voter.id}>
-                      <span className="avatar">{voter.username.slice(0, 1).toUpperCase()}</span>
-                      <span>
-                        <strong>{voter.username}</strong>
-                        <small>{voter.email}</small>
-                      </span>
-                    </div>
-                  ))}
-                </div>
+              {resultsRevealed && (
+                <button
+                  type="button"
+                  className="voters-toggle"
+                  onClick={() => void toggleVoters(option.id)}
+                >
+                  {expandedOption === option.id ? 'Hide voters' : 'See voters'}{' '}
+                  <span aria-hidden="true">↓</span>
+                </button>
               )}
             </article>
           )
         })}
+      </div>
+      {expandedVoterOption && (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onClick={() => setExpandedOption(null)}
+        >
+          <section
+            className="voters-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="voters-modal-heading"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="modal-header">
+              <div>
+                <p className="eyebrow">VOTERS</p>
+                <h2 id="voters-modal-heading">{expandedVoterOption.text}</h2>
+              </div>
+              <button
+                type="button"
+                className="modal-close-button"
+                onClick={() => setExpandedOption(null)}
+              >
+                Cancel
+              </button>
+            </div>
+            <div className="voters-modal-list">
+              {voterError && <ErrorBanner message={voterError} />}
+              {loadingVoters === expandedVoterOption.id && (
+                <LoadingState label="Loading voters…" />
+              )}
+              {voters[expandedVoterOption.id]?.length === 0 && (
+                <p className="muted">No one has voted for this option yet.</p>
+              )}
+              {voters[expandedVoterOption.id]?.map((voter) => (
+                <div className="voter-row" key={voter.id}>
+                  <span className="avatar">
+                    {voter.username.slice(0, 1).toUpperCase()}
+                  </span>
+                  <span>
+                    <strong>{voter.username}</strong>
+                    <small>{voter.email}</small>
+                  </span>
+                </div>
+              ))}
+            </div>
+          </section>
+        </div>
+      )}
+    </section>
+  )
+}
+
+type VoteDistributionProps = {
+  options: Poll['options']
+  counts: Record<number, number>
+  totalVotes: number
+}
+
+function VoteDistribution({
+  options,
+  counts,
+  totalVotes,
+}: VoteDistributionProps) {
+  const colors = ['#1d7a4b', '#e3a53b', '#4f8fc0', '#b86ca8', '#d46b4d', '#6877b5']
+  const percentageFor = (optionID: number) =>
+    totalVotes ? ((counts[optionID] ?? 0) / totalVotes) * 100 : 0
+  const segments = options.map((option, index) => {
+    const percentage = percentageFor(option.id)
+    const start = options
+      .slice(0, index)
+      .reduce((sum, previous) => sum + percentageFor(previous.id), 0)
+    const segment = `${colors[index % colors.length]} ${start}% ${start + percentage}%`
+    return { option, segment, color: colors[index % colors.length] }
+  })
+
+  return (
+    <section className="distribution-card" aria-labelledby="distribution-heading">
+      <div>
+        <p className="eyebrow">RESULTS</p>
+        <h2 id="distribution-heading">Vote distribution</h2>
+        <p className="muted">Here’s how the room is leaning.</p>
+      </div>
+      <div className="distribution-content">
+        <div
+          className="pie-chart"
+          role="img"
+          aria-label={`Vote distribution across ${options.length} options`}
+          style={{
+            background: totalVotes
+              ? `conic-gradient(${segments.map((segment) => segment.segment).join(', ')})`
+              : 'var(--surface-soft)',
+          }}
+        >
+          <div className="pie-chart-center">
+            <strong>{totalVotes}</strong>
+            <span>votes</span>
+          </div>
+        </div>
+        <div className="distribution-legend">
+          {segments.map(({ option, color }) => (
+            <div className="legend-item" key={option.id}>
+              <span className="legend-swatch" style={{ background: color }} />
+              <span className="legend-label">{option.text}</span>
+            </div>
+          ))}
+        </div>
       </div>
     </section>
   )

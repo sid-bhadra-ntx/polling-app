@@ -3,6 +3,9 @@ BACKEND_DIR := backend
 BUILD_DIR := build
 BINARY := $(BUILD_DIR)/poll-app
 STATIC_DIR := $(BUILD_DIR)/static
+GO_TMP_DIR ?= $(HOME)/poll-app-tmp
+GO_CACHE_DIR ?= $(HOME)/poll-app-cache
+GO_MOD_CACHE_DIR ?= $(HOME)/poll-app-modcache
 
 .PHONY: all install frontend-build static backend-build backend-test frontend-lint verify run dev clean
 
@@ -20,11 +23,12 @@ static: frontend-build
 	cp -R $(FRONTEND_DIR)/dist/. $(STATIC_DIR)/
 
 backend-build:
-	mkdir -p $(BUILD_DIR)
-	cd $(BACKEND_DIR) && go build -o ../$(BINARY) .
+	mkdir -p $(BUILD_DIR) "$(GO_TMP_DIR)" "$(GO_CACHE_DIR)" "$(GO_MOD_CACHE_DIR)"
+	cd $(BACKEND_DIR) && GOTMPDIR="$(GO_TMP_DIR)" GOCACHE="$(GO_CACHE_DIR)" GOMODCACHE="$(GO_MOD_CACHE_DIR)" go build -o ../$(BINARY) .
 
 backend-test:
-	cd $(BACKEND_DIR) && go test ./... && go vet ./...
+	mkdir -p "$(GO_TMP_DIR)" "$(GO_CACHE_DIR)" "$(GO_MOD_CACHE_DIR)"
+	cd $(BACKEND_DIR) && GOTMPDIR="$(GO_TMP_DIR)" GOCACHE="$(GO_CACHE_DIR)" GOMODCACHE="$(GO_MOD_CACHE_DIR)" go test ./... && GOTMPDIR="$(GO_TMP_DIR)" GOCACHE="$(GO_CACHE_DIR)" GOMODCACHE="$(GO_MOD_CACHE_DIR)" go vet ./...
 
 frontend-lint:
 	cd $(FRONTEND_DIR) && npm run lint

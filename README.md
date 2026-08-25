@@ -21,21 +21,54 @@ service layout for Nutanix Calm.
 
 ## Local PostgreSQL lifecycle
 
-Start PostgreSQL before running the application:
+PostgreSQL 16 may use a new cluster when it is installed alongside an older
+PostgreSQL version. The application database from the older cluster will not
+automatically appear in the new one. Confirm that the PostgreSQL 16 cluster
+contains `poll_app` before starting the application.
+
+### First-time setup for a PostgreSQL cluster
+
+Run this once for a new or empty local PostgreSQL cluster. Use the same local
+database password in the `CREATE USER` command and in `DB_PASSWORD` below:
 
 ```bash
 sudo systemctl start postgresql
 pg_isready -h 127.0.0.1 -p 5432
+
+sudo -u postgres psql -c "CREATE USER poll_app WITH PASSWORD 'your-local-password';"
+sudo -u postgres psql -c "CREATE DATABASE poll_app OWNER poll_app;"
+psql -h 127.0.0.1 -U poll_app -d poll_app -W -f ./schema.sql
 ```
 
-Apply `schema.sql` only once to a new or empty application database:
+If `poll_app` or the `poll_app` role already exists, skip its corresponding
+creation command. Apply `schema.sql` only to a new or empty database. Running
+`systemctl restart postgresql` does not delete stored users, polls, or votes.
+
+### Routine local startup
+
+Run these commands from the repository root each time you start the
+application. Reuse the same `JWT_SECRET` value across restarts:
 
 ```bash
-psql -h 127.0.0.1 -U postgres -d poll_app -W -f schema.sql
+cd /home/siddhant.bhadra/poll-app
+
+sudo systemctl start postgresql
+pg_isready -h 127.0.0.1 -p 5432
+
+export DB_HOST=127.0.0.1
+export DB_PORT=5432
+export DB_USER=poll_app
+export DB_PASSWORD='your-local-password'
+export DB_NAME=poll_app
+export JWT_SECRET='your-fixed-secret-value'
+export PORT=8080
+
+make run
 ```
 
-If the tables already exist, do not rerun the schema file. Stopping and
-starting PostgreSQL does not delete the stored users, polls, or votes.
+Open `http://localhost:8080` after the backend starts. Stop the backend with
+`Ctrl+C` in the terminal running `make run`. If port 8080 is already in use,
+stop the existing `poll-app` process before starting another one.
 
 ## Build and package
 
@@ -73,18 +106,7 @@ make verify
 The integration suite is skipped when `API_TEST_DATABASE_URL` is unset.
 
 `make run` expects the database to be provisioned and the required environment
-variables to be set:
-
-```bash
-export DB_HOST=127.0.0.1
-export DB_PORT=5432
-export DB_USER=poll_app
-export DB_PASSWORD='your-password'
-export DB_NAME=poll_app
-export JWT_SECRET='replace-with-a-long-random-secret'
-make run
-```
-
+variables to be set as shown in the routine startup instructions above.
 Exported variables apply only to the current terminal session. If you open a
 new terminal, export them again before running the application.
 

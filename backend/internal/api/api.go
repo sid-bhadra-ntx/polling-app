@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -43,6 +44,8 @@ func NewHandler(client *ent.Client, cfg config.Config) http.Handler {
 	router.PUT("/api/polls/:id", api.requireAuth(api.updatePoll))
 	router.DELETE("/api/polls/:id", api.requireAuth(api.deletePoll))
 	router.POST("/api/polls/:id/vote", api.requireAuth(api.vote))
+	router.DELETE("/api/polls/:id/vote", api.requireAuth(api.removeVote))
+	router.GET("/api/polls/:id/my-votes", api.requireAuth(api.myVotes))
 	router.GET("/api/polls/:id/counts", api.requireAuth(api.pollCounts))
 	router.GET("/api/options/:id/voters", api.requireAuth(api.optionVoters))
 	return router
@@ -92,11 +95,13 @@ type optionResponse struct {
 }
 
 type pollResponse struct {
-	ID          int              `json:"id"`
-	Title       string           `json:"title"`
-	Description string           `json:"description"`
-	CreatorID   int              `json:"creator_id"`
-	Options     []optionResponse `json:"options"`
+	ID              int              `json:"id"`
+	Title           string           `json:"title"`
+	Description     string           `json:"description"`
+	CreatorID       int              `json:"creator_id"`
+	CreatorUsername string           `json:"creator_username"`
+	HasVoted        bool             `json:"has_voted"`
+	Options         []optionResponse `json:"options"`
 }
 
 func (a *API) signup(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
@@ -122,6 +127,7 @@ func (a *API) signup(w http.ResponseWriter, r *http.Request, _ httprouter.Params
 		SetPasswordHash(passwordHash).
 		Save(r.Context())
 	if err != nil {
+		log.Printf("signup: database insert failed: %v", err)
 		if ent.IsConstraintError(err) {
 			writeError(w, http.StatusConflict, "username or email is already registered")
 			return
@@ -172,14 +178,25 @@ func (a *API) login(w http.ResponseWriter, r *http.Request, _ httprouter.Params)
 }
 
 func (a *API) listPolls(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
-	polls, err := a.client.Poll.Query().WithOptions().Order(ent.Asc("id")).All(r.Context())
+	polls, err := a.client.Poll.Query().
+		WithOptions().
+		WithCreator().
+		Order(ent.Asc("id")).
+		All(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not load polls")
 		return
 	}
+	votedPolls, err := a.votedPollIDs(r.Context(), authenticatedUserID(r.Context()))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not load voting status")
+		return
+	}
 	response := make([]pollResponse, 0, len(polls))
 	for _, item := range polls {
-		response = append(response, toPollResponse(item))
+		itemResponse := toPollResponse(item)
+		itemResponse.HasVoted = votedPolls[item.ID]
+		response = append(response, itemResponse)
 	}
 	writeJSON(w, http.StatusOK, response)
 }
@@ -192,6 +209,7 @@ func (a *API) getPoll(w http.ResponseWriter, r *http.Request, params httprouter.
 	item, err := a.client.Poll.Query().
 		Where(poll.IDEQ(id)).
 		WithOptions().
+		WithCreator().
 		Only(r.Context())
 	if ent.IsNotFound(err) {
 		writeError(w, http.StatusNotFound, "poll not found")
@@ -201,7 +219,17 @@ func (a *API) getPoll(w http.ResponseWriter, r *http.Request, params httprouter.
 		writeError(w, http.StatusInternalServerError, "could not load poll")
 		return
 	}
-	writeJSON(w, http.StatusOK, toPollResponse(item))
+	response := toPollResponse(item)
+	response.HasVoted, err = a.userHasVotedInPoll(
+		r.Context(),
+		authenticatedUserID(r.Context()),
+		id,
+	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not load voting status")
+		return
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (a *API) createPoll(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
@@ -244,7 +272,11 @@ func (a *API) createPoll(w http.ResponseWriter, r *http.Request, _ httprouter.Pa
 		writeError(w, http.StatusInternalServerError, "could not save poll")
 		return
 	}
-	result, err := a.client.Poll.Query().Where(poll.IDEQ(created.ID)).WithOptions().Only(r.Context())
+	result, err := a.client.Poll.Query().
+		Where(poll.IDEQ(created.ID)).
+		WithOptions().
+		WithCreator().
+		Only(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not load created poll")
 		return
@@ -355,7 +387,11 @@ func (a *API) updatePoll(w http.ResponseWriter, r *http.Request, params httprout
 		writeError(w, http.StatusInternalServerError, "could not save poll")
 		return
 	}
-	result, err := a.client.Poll.Query().Where(poll.IDEQ(id)).WithOptions().Only(r.Context())
+	result, err := a.client.Poll.Query().
+		Where(poll.IDEQ(id)).
+		WithOptions().
+		WithCreator().
+		Only(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not load updated poll")
 		return
@@ -419,30 +455,122 @@ func (a *API) vote(w http.ResponseWriter, r *http.Request, params httprouter.Par
 	writeJSON(w, http.StatusCreated, map[string]int{"id": created.ID, "option_id": option.ID})
 }
 
+func (a *API) removeVote(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
+	pollID, ok := pathID(w, params)
+	if !ok {
+		return
+	}
+	var request voteRequest
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	if request.OptionID <= 0 {
+		writeError(w, http.StatusBadRequest, "option_id must be positive")
+		return
+	}
+	option, err := a.client.PollOption.Query().
+		Where(polloption.IDEQ(request.OptionID), polloption.PollIDEQ(pollID)).
+		Only(r.Context())
+	if ent.IsNotFound(err) {
+		writeError(w, http.StatusBadRequest, "option does not belong to this poll")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not validate option")
+		return
+	}
+	deleted, err := a.client.Vote.Delete().
+		Where(
+			vote.UserIDEQ(authenticatedUserID(r.Context())),
+			vote.OptionIDEQ(option.ID),
+		).
+		Exec(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not remove vote")
+		return
+	}
+	if deleted == 0 {
+		writeError(w, http.StatusNotFound, "vote not found")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *API) myVotes(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
+	pollID, ok := pathID(w, params)
+	if !ok {
+		return
+	}
+	exists, err := a.client.Poll.Query().Where(poll.IDEQ(pollID)).Exist(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not load poll")
+		return
+	}
+	if !exists {
+		writeError(w, http.StatusNotFound, "poll not found")
+		return
+	}
+
+	optionIDs, err := a.client.PollOption.Query().
+		Where(polloption.PollIDEQ(pollID)).
+		IDs(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not load poll options")
+		return
+	}
+	if len(optionIDs) == 0 {
+		writeJSON(w, http.StatusOK, []int{})
+		return
+	}
+	votes, err := a.client.Vote.Query().
+		Where(
+			vote.UserIDEQ(authenticatedUserID(r.Context())),
+			vote.OptionIDIn(optionIDs...),
+		).
+		Order(ent.Asc("id")).
+		All(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not load votes")
+		return
+	}
+	response := make([]int, 0, len(votes))
+	for _, item := range votes {
+		response = append(response, item.OptionID)
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
 func (a *API) pollCounts(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
 	pollID, ok := pathID(w, params)
 	if !ok {
 		return
 	}
-	options, err := a.client.PollOption.Query().Where(polloption.PollIDEQ(pollID)).Order(ent.Asc("id")).All(r.Context())
-	if ent.IsNotFound(err) {
+	exists, err := a.client.Poll.Query().Where(poll.IDEQ(pollID)).Exist(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not load poll")
+		return
+	}
+	if !exists {
 		writeError(w, http.StatusNotFound, "poll not found")
 		return
 	}
+	hasVoted, err := a.userHasVotedInPoll(
+		r.Context(),
+		authenticatedUserID(r.Context()),
+		pollID,
+	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not check voting status")
+		return
+	}
+	if !hasVoted {
+		writeError(w, http.StatusForbidden, "vote in this poll before viewing results")
+		return
+	}
+	options, err := a.client.PollOption.Query().Where(polloption.PollIDEQ(pollID)).Order(ent.Asc("id")).All(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not load poll options")
 		return
-	}
-	if len(options) == 0 {
-		exists, queryErr := a.client.Poll.Query().Where(poll.IDEQ(pollID)).Exist(r.Context())
-		if queryErr != nil {
-			writeError(w, http.StatusInternalServerError, "could not load poll")
-			return
-		}
-		if !exists {
-			writeError(w, http.StatusNotFound, "poll not found")
-			return
-		}
 	}
 	type count struct {
 		OptionID int    `json:"option_id"`
@@ -466,6 +594,30 @@ func (a *API) optionVoters(w http.ResponseWriter, r *http.Request, params httpro
 	if !ok {
 		return
 	}
+	option, err := a.client.PollOption.Query().
+		Where(polloption.IDEQ(optionID)).
+		Only(r.Context())
+	if ent.IsNotFound(err) {
+		writeError(w, http.StatusNotFound, "option not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not load option")
+		return
+	}
+	hasVoted, err := a.userHasVotedInPoll(
+		r.Context(),
+		authenticatedUserID(r.Context()),
+		option.PollID,
+	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not check voting status")
+		return
+	}
+	if !hasVoted {
+		writeError(w, http.StatusForbidden, "vote in this poll before viewing voters")
+		return
+	}
 	votes, err := a.client.Vote.Query().
 		Where(vote.OptionIDEQ(optionID)).
 		WithUser().
@@ -474,17 +626,6 @@ func (a *API) optionVoters(w http.ResponseWriter, r *http.Request, params httpro
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not load voters")
 		return
-	}
-	if len(votes) == 0 {
-		exists, queryErr := a.client.PollOption.Query().Where(polloption.IDEQ(optionID)).Exist(r.Context())
-		if queryErr != nil {
-			writeError(w, http.StatusInternalServerError, "could not load option")
-			return
-		}
-		if !exists {
-			writeError(w, http.StatusNotFound, "option not found")
-			return
-		}
 	}
 	response := make([]userResponse, 0, len(votes))
 	for _, item := range votes {
@@ -495,6 +636,32 @@ func (a *API) optionVoters(w http.ResponseWriter, r *http.Request, params httpro
 		}
 	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+func (a *API) userHasVotedInPoll(ctx context.Context, userID, pollID int) (bool, error) {
+	return a.client.Vote.Query().
+		Where(
+			vote.UserIDEQ(userID),
+			vote.HasOptionWith(polloption.PollIDEQ(pollID)),
+		).
+		Exist(ctx)
+}
+
+func (a *API) votedPollIDs(ctx context.Context, userID int) (map[int]bool, error) {
+	votes, err := a.client.Vote.Query().
+		Where(vote.UserIDEQ(userID)).
+		WithOption().
+		All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	votedPolls := make(map[int]bool, len(votes))
+	for _, item := range votes {
+		if item.Edges.Option != nil {
+			votedPolls[item.Edges.Option.PollID] = true
+		}
+	}
+	return votedPolls, nil
 }
 
 func (a *API) requireAuth(next httprouter.Handle) httprouter.Handle {
@@ -564,8 +731,15 @@ func validateUpdatePollRequest(request *updatePollRequest) error {
 
 func toPollResponse(item *ent.Poll) pollResponse {
 	response := pollResponse{
-		ID: item.ID, Title: item.Title, Description: item.Description, CreatorID: item.CreatorID,
-		Options: make([]optionResponse, 0, len(item.Edges.Options)),
+		ID:              item.ID,
+		Title:           item.Title,
+		Description:     item.Description,
+		CreatorID:       item.CreatorID,
+		CreatorUsername: "",
+		Options:         make([]optionResponse, 0, len(item.Edges.Options)),
+	}
+	if item.Edges.Creator != nil {
+		response.CreatorUsername = item.Edges.Creator.Username
 	}
 	for _, option := range item.Edges.Options {
 		response.Options = append(response.Options, optionResponse{ID: option.ID, Text: option.Text})
