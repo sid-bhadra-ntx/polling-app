@@ -38,6 +38,7 @@ func NewHandler(client *ent.Client, cfg config.Config) http.Handler {
 
 	router.POST("/api/signup", api.signup)
 	router.POST("/api/login", api.login)
+	router.GET("/api/health", api.health)
 	router.GET("/api/polls", api.requireAuth(api.listPolls))
 	router.GET("/api/polls/:id", api.requireAuth(api.getPoll))
 	router.POST("/api/polls", api.requireAuth(api.createPoll))
@@ -48,6 +49,7 @@ func NewHandler(client *ent.Client, cfg config.Config) http.Handler {
 	router.GET("/api/polls/:id/my-votes", api.requireAuth(api.myVotes))
 	router.GET("/api/polls/:id/counts", api.requireAuth(api.pollCounts))
 	router.GET("/api/options/:id/voters", api.requireAuth(api.optionVoters))
+	router.POST("/api/admin/clear-data", api.requireAuth(api.requireServiceAccount(api.clearData)))
 	return router
 }
 
@@ -102,6 +104,18 @@ type pollResponse struct {
 	CreatorUsername string           `json:"creator_username"`
 	HasVoted        bool             `json:"has_voted"`
 	Options         []optionResponse `json:"options"`
+}
+
+func (a *API) health(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+	if a.client == nil {
+		writeError(w, http.StatusServiceUnavailable, "database is unavailable")
+		return
+	}
+	if _, err := a.client.User.Query().Limit(1).Exist(r.Context()); err != nil {
+		writeError(w, http.StatusServiceUnavailable, "database is unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (a *API) signup(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
@@ -416,6 +430,34 @@ func (a *API) deletePoll(w http.ResponseWriter, r *http.Request, params httprout
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (a *API) clearData(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+	tx, err := a.client.Tx(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not start cleanup transaction")
+		return
+	}
+
+	votesDeleted, err := tx.Vote.Delete().Exec(r.Context())
+	pollsDeleted := 0
+	if err == nil {
+		pollsDeleted, err = tx.Poll.Delete().Exec(r.Context())
+	}
+	if err != nil {
+		_ = tx.Rollback()
+		writeError(w, http.StatusInternalServerError, "could not clear poll data")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not save cleanup")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]int{
+		"votes_deleted": votesDeleted,
+		"polls_deleted": pollsDeleted,
+	})
+}
+
 func (a *API) vote(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
 	pollID, ok := pathID(w, params)
 	if !ok {
@@ -677,6 +719,19 @@ func (a *API) requireAuth(next httprouter.Handle) httprouter.Handle {
 			return
 		}
 		next(w, r.WithContext(context.WithValue(r.Context(), userIDKey, claims.UserID)), params)
+	}
+}
+
+func (a *API) requireServiceAccount(next httprouter.Handle) httprouter.Handle {
+	return func(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
+		account, err := a.client.User.Query().
+			Where(user.IDEQ(authenticatedUserID(r.Context()))).
+			Only(r.Context())
+		if err != nil || account.Username != "service_account" {
+			writeError(w, http.StatusForbidden, "service account required")
+			return
+		}
+		next(w, r, params)
 	}
 }
 

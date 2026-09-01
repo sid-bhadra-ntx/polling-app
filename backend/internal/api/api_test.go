@@ -19,3 +19,15 @@ func TestProtectedRoutesRequireBearerToken(t *testing.T) {
 		t.Fatalf("expected 401, got %d", response.Code)
 	}
 }
+
+func TestCleanupRouteRequiresBearerToken(t *testing.T) {
+	handler := NewHandler(nil, config.Config{JWTSecret: "test-secret"})
+	request := httptest.NewRequest(http.MethodPost, "/api/admin/clear-data", nil)
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", response.Code)
+	}
+}
